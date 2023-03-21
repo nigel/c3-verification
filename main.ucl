@@ -12,7 +12,11 @@ module main {
     var pointer_key :   bv24;
     var data_key    :   bv24;
 
+    // if doesnt end up terminating
+    // addr_alloc : [alloc_ind_t]bv64;
+    // alloc_ind_t = bv3;
     var addr_alloc  :   [addr_t]bv64; // map of allocated addresses with their size
+    var addr_is_alloc  :   [addr_t]boolean; // map of allocated addresses with their size
 
     /* Procedures that describe unit behavior */
 
@@ -26,6 +30,8 @@ module main {
 
     oracle function [log2ceil] log2ceil(arg : bv64) : bv64;
 
+    // define macro_log2ceil (arg: bv64) : bv6 = if (arg[63:63] == 1bv1) then 63bv6 else ...
+
     define fold_op(arg : bv40) : bv24 = arg[23 : 0] ^ (0bv24 | arg[39 : 24]);
 
     define k_cipher(
@@ -35,8 +41,11 @@ module main {
 
     function size2power (size : bv64) : bv6;
 
+    0bv56 ++ power
     function get_fixed_addr (power : bv6, addr : addr_t) : bv34;
     function get_offset (power : bv6, addr : addr_t) : bv34;
+    define macro_get_offset (power : bv6, addr : addr_t) : bv34 = 
+        (bv_l_right_shift((64bv64 - (0bv56 ++ power)), bv_left_shift((64bv64 - (0bv56 ++ power)), addr)))[33:0];
     function generate_addr (size : bv64) : addr_t;
 
     // generate_addr must allocated an addr
@@ -71,7 +80,9 @@ module main {
 
         // generate raw physical address from the allocator
         addr = generate_addr(size);
+        assume(addr_is_alloc[addr] == false);
         addr_alloc[addr] = size;
+        addr_is_alloc[addr] = true;
         upper_addr = addr[57 : 34]; // our plaintext
 
         // setup the tweak
