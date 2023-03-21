@@ -1,0 +1,107 @@
+module main {
+
+    /* Type encoding */
+    type addr_t = bv64;
+    type ca_t = bv64;
+    type data_t = bv64;
+    type pid_t = bv1;
+    type mem_t = [addr_t]data_t;
+
+    /* State variables */
+    var memory      :   mem_t;
+    var pointer_key :   bv24;
+    var data_key    :   bv24;
+
+    var addr_alloc  :   [addr_t]bv64; // map of allocated addresses with their size
+
+    /* Procedures that describe unit behavior */
+
+    // Generates CA by encrypting addr with pointer_key, addr, and power
+    /*
+    procedure agu(addr  : addr_t, pointer_key   : bv64, power : bv64)
+        returns ca : ca_t;
+    {
+    }
+    */
+
+    oracle function [log2ceil] log2ceil(arg : bv64) : bv64;
+
+    define fold_op(arg : bv40) : bv24 = arg[23 : 0] ^ (0bv24 | arg[39 : 24]);
+
+    define k_cipher(
+                plaintext : bv24,
+                key : bv24,
+                tweak : bv24) : bv24 = plaintext ^ key ^ tweak;
+
+    function size2power (size : bv64) : bv6;
+
+    function get_fixed_addr (power : bv6, addr : addr_t) : bv34;
+    function get_offset (power : bv6, addr : addr_t) : bv34;
+    function generate_addr (size : bv64) : addr_t;
+
+    // generate_addr must allocated an addr
+    axiom (forall (size : bv64) :: addr_alloc[generate_addr(size)] == size);
+    // genereted addr must be previously unused.
+    axiom (forall (size : bv64) :: old(addr_alloc)[generate_addr(size)] == 0bv64);
+
+    // Ensure correctness of get_offset and get_fixed_addr
+    axiom (forall (power : bv6, addr : addr_t) ::
+           ((get_fixed_addr(power, addr) | get_offset(power, addr)) == addr[33 : 0]));
+
+    // Allocate memory, takes in a size.
+    procedure malloc(size : bv64)
+        returns (ca : ca_t)
+        modifies memory, addr_alloc;
+        requires (size > 0bv64);
+    {
+        // The address we generate given the size.
+        var addr : addr_t;
+
+        // Parts of the address
+        var padded_fixed_addr : bv34;
+        var padded_offset : bv34;
+        var upper_addr : bv24;
+
+        // Arguments for K-Cipher
+        var key : bv24; // pointer key
+        var power : bv6;
+        var tweak : bv24;
+
+        var encrypted_slice : bv24;
+
+        // generate raw physical address from the allocator
+        addr = generate_addr(size);
+        addr_alloc[addr] = size;
+        upper_addr = addr[57 : 34]; // our plaintext
+
+        // setup the tweak
+        power = log2ceil(size)[5 : 0];
+        padded_offset = get_offset(power, addr);
+        padded_fixed_addr = get_fixed_addr(power, addr);
+
+        tweak = fold_op(power ++ padded_fixed_addr);
+
+        // k-cipher, return cryptographic address 
+        encrypted_slice = k_cipher(upper_addr, key, tweak);
+        ca = power ++ encrypted_slice ++ addr[33 : 0];
+    }
+
+    init {
+        // no allocations, all set to 0.
+        assume (forall (i : addr_t) :: addr_alloc[i] == 0bv64);
+    }
+
+    next {
+        /*
+        var s   : bv64;
+        var allocation  : ca_t;
+        assume (s > 0bv64);
+
+        'allocation = malloc(s);
+        */
+    }
+
+    control {
+    }
+
+}
