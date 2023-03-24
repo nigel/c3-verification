@@ -12,20 +12,15 @@ module main {
     var pointer_key :   bv24;
     var data_key    :   bv24;
 
+    // If doesn't end up terminating,
+    // addr_alloc : [alloc_ind_t]bv64;
+    // alloc_ind_t : bv3
     var addr_alloc  :   [addr_t]bv64; // map of allocated addresses with their size
+    var addr_is_alloc  :   [addr_t]boolean; // lets us know if an addr is allocated.
 
     /* Procedures that describe unit behavior */
 
-    // Generates CA by encrypting addr with pointer_key, addr, and power
-    /*
-    procedure agu(addr  : addr_t, pointer_key   : bv64, power : bv64)
-        returns ca : ca_t;
-    {
-    }
-    */
-
-    oracle function [log2ceil] log2ceil(arg : bv64) : bv64;
-
+    define log2ceil(arg : bv64) : bv6 = if (arg < 2bv64) then 0bv6 else 1bv6;
     define fold_op(arg : bv40) : bv24 = arg[23 : 0] ^ (0bv24 | arg[39 : 24]);
 
     define k_cipher(
@@ -33,25 +28,18 @@ module main {
                 key : bv24,
                 tweak : bv24) : bv24 = plaintext ^ key ^ tweak;
 
-    function size2power (size : bv64) : bv6;
+    define get_fixed_addr (power : bv6, addr: addr_t) : bv34 =
+        (bv_l_right_shift(addr, 0bv58 ++ power) & (bv_left_shift(33bv64 - (0bv58 ++ power) + 2bv64, 1bv64) - 1bv64))[33:0];
 
-    function get_fixed_addr (power : bv6, addr : addr_t) : bv34;
-    function get_offset (power : bv6, addr : addr_t) : bv34;
+    define get_offset (power : bv6, addr: addr_t) : bv34 =
+        (addr & (bv_left_shift((0bv58 ++ power) + 1bv64, 1bv64) - 1bv64))[33 : 0];
+
     function generate_addr (size : bv64) : addr_t;
-
-    // generate_addr must allocated an addr
-    axiom (forall (size : bv64) :: addr_alloc[generate_addr(size)] == size);
-    // genereted addr must be previously unused.
-    axiom (forall (size : bv64) :: old(addr_alloc)[generate_addr(size)] == 0bv64);
-
-    // Ensure correctness of get_offset and get_fixed_addr
-    axiom (forall (power : bv6, addr : addr_t) ::
-           ((get_fixed_addr(power, addr) | get_offset(power, addr)) == addr[33 : 0]));
 
     // Allocate memory, takes in a size.
     procedure malloc(size : bv64)
         returns (ca : ca_t)
-        modifies memory, addr_alloc;
+        modifies memory, addr_alloc, addr_is_alloc;
         requires (size > 0bv64);
     {
         // The address we generate given the size.
@@ -71,13 +59,21 @@ module main {
 
         // generate raw physical address from the allocator
         addr = generate_addr(size);
+        assume (addr_is_alloc[addr] == false);
         addr_alloc[addr] = size;
-        upper_addr = addr[57 : 34]; // our plaintext
+        addr_is_alloc[addr] = true;
+
+        // LAM48 format. (page 11 of C^3 spec)
+        upper_addr = addr[47 : 34];
 
         // setup the tweak
-        power = log2ceil(size)[5 : 0];
+        power = log2ceil(size);
+
         padded_offset = get_offset(power, addr);
         padded_fixed_addr = get_fixed_addr(power, addr);
+
+        // Sanity check that we extracted the correct things
+        assert ((padded_offset | padded_fixed_addr) == addr[33:0]);
 
         tweak = fold_op(power ++ padded_fixed_addr);
 
@@ -89,6 +85,7 @@ module main {
     init {
         // no allocations, all set to 0.
         assume (forall (i : addr_t) :: addr_alloc[i] == 0bv64);
+        //assume (forall (i : addr_t) :: addr_is_alloc[i] == false);
     }
 
     next {
