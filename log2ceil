@@ -1,7 +1,0 @@
-#!/bin/bash
-if [ -z "$1" ]
-then
-    echo "0"
-else
-    echo "l($1)/l(2)" | bc -l | awk '{printf("%d\n",$0+0.999999999999)}'
-fi

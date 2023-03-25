@@ -5,7 +5,7 @@ module main {
     type ca_t = bv64;
     type data_t = bv64;
     type pid_t = bv1;
-    type mem_t = [addr_t]data_t;
+    type mem_t = [addr_t]data_t; // byte addressable memory
 
     /* State variables */
     var memory      :   mem_t;
@@ -15,10 +15,13 @@ module main {
     // spec 0.5 says these keys should be 72 bits
 
     /* Specifies the size of a given allocation */
-    var addr_alloc  :   [addr_t]bv64;
+    //var addr_alloc  :   [addr_t]bv64;
 
-    /* True if there's an active allocation of addr_t */
+    /* True if there's an active allocation of addr_t (for allocator use) */
     var addr_is_alloc  :   [addr_t]boolean;
+
+    /* spec p14 defines maximum allocation size */
+    define MAX_ALLOC_SIZE() : bv64 = 4000000000bv64;
 
     /* Calculates the tweak to be used with K-Cipher */
     define calculate_tweak(arg : bv38) : bv24 =
@@ -32,11 +35,13 @@ module main {
 
     /* Extracts bits [31 : power] from addr */
     define get_fixed_addr (power : bv6, addr: addr_t) : bv32 =
-        bv_left_shift(0bv58 ++ power , bv_l_right_shift(0bv58 ++ power, addr & 4294967295bv64))[31 : 0];
+        bv_left_shift(0bv58 ++ power,
+            bv_l_right_shift(0bv58 ++ power, addr & 4294967295bv64))[31 : 0];
 
     /* Extracts bits [power - 1 : 0] from addr */
     define get_offset (power : bv6, addr: addr_t) : bv32 =
-    (bv_l_right_shift((64bv64 - (0bv58 ++ power)), bv_left_shift((64bv64 - (0bv58 ++ power)), addr)))[31:0];
+        (bv_l_right_shift((64bv64 - (0bv58 ++ power)),
+            bv_left_shift((64bv64 - (0bv58 ++ power)), addr)))[31:0];
 
     /* Generates a raw address */
     function generate_addr (size : bv64) : addr_t;
@@ -44,14 +49,17 @@ module main {
     /* Get the power bits from the size */
     function generate_power (size : bv64) : bv6;
 
+    define begin (): bv64 = 0bv64;
+
     /* Generates a CA given a size */
     procedure malloc(size : bv64)
         returns (ca : ca_t)
-        modifies memory, addr_alloc, addr_is_alloc;
-        requires (size > 0bv64);
+        modifies addr_is_alloc;
+        requires ((size > 0bv64) && (size <= MAX_ALLOC_SIZE()));
     {
         // The address we generate given the size.
         var addr : addr_t;
+        var _addr : addr_t;
 
         // Parts of the address
         var padded_fixed_addr : bv32;
@@ -70,12 +78,17 @@ module main {
         power = generate_power(size);
         assume ((bv_left_shift(0bv58 ++ power, 1bv64) >= size)
             && bv_left_shift(0bv58 ++ (power - 1bv6), 1bv64) < size);
+        power = power + 1bv6;
 
-        // generate raw physical address from the allocator
+        // Generate address and make sure it has enough space.
         addr = generate_addr(size);
-        assume (addr_is_alloc[addr] == false);
-        addr_alloc[addr] = size;
-        addr_is_alloc[addr] = true;
+        assume (forall (i : bv64) :: ((i >= 0bv64) &&
+            (i < size)) ==> (addr_is_alloc[addr + i] == false));
+        _addr = addr;
+        while (_addr <= (addr + size)) {
+            addr_is_alloc[_addr] = true;
+            _addr = addr + 1bv64;
+        }
 
         // LAM48 spec
         upper_addr = addr[46 : 32];
@@ -98,7 +111,6 @@ module main {
     }
 
     init {
-        assume (forall (i : addr_t) :: addr_alloc[i] == 0bv64);
         assume (forall (i : addr_t) :: addr_is_alloc[i] == false);
     }
 
@@ -109,7 +121,7 @@ module main {
 
     next {
         var size : bv64;
-        assume (size > 0bv64);
+        assume ((size > 0bv64) && (size <= MAX_ALLOC_SIZE()));
         call (alloc') = malloc(size);
     }
 
