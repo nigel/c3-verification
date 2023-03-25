@@ -11,32 +11,40 @@ module main {
     var memory      :   mem_t;
     var pointer_key :   bv24;
     var data_key    :   bv24;
+    // TODO pointer_key and data_key will need to be per process.
+    // spec 0.5 says these keys should be 72 bits
 
-    // If doesn't end up terminating,
-    // addr_alloc : [alloc_ind_t]bv64;
-    // alloc_ind_t : bv3
-    var addr_alloc  :   [addr_t]bv64; // map of allocated addresses with their size
-    var addr_is_alloc  :   [addr_t]boolean; // lets us know if an addr is allocated.
+    /* Specifies the size of a given allocation */
+    var addr_alloc  :   [addr_t]bv64;
 
-    /* Procedures that describe unit behavior */
+    /* True if there's an active allocation of addr_t */
+    var addr_is_alloc  :   [addr_t]boolean;
 
-    define log2ceil(arg : bv64) : bv6 = if (arg < 2bv64) then 0bv6 else 1bv6;
-    define fold_op(arg : bv40) : bv24 = arg[23 : 0] ^ (0bv24 | arg[39 : 24]);
+    /* Calculates the tweak to be used with K-Cipher */
+    define calculate_tweak(arg : bv38) : bv24 =
+        arg[23 : 0] ^ (0bv10 ++ arg[37 : 24]);
 
     define k_cipher(
                 plaintext : bv24,
                 key : bv24,
                 tweak : bv24) : bv24 = plaintext ^ key ^ tweak;
+    // TODO need to define axioms for cryptographic unit.
 
-    define get_fixed_addr (power : bv6, addr: addr_t) : bv34 =
-        (bv_l_right_shift(addr, 0bv58 ++ power) & (bv_left_shift(33bv64 - (0bv58 ++ power) + 2bv64, 1bv64) - 1bv64))[33:0];
+    /* Extracts bits [31 : power] from addr */
+    define get_fixed_addr (power : bv6, addr: addr_t) : bv32 =
+        bv_left_shift(0bv58 ++ power , bv_l_right_shift(0bv58 ++ power, addr & 4294967295bv64))[31 : 0];
 
-    define get_offset (power : bv6, addr: addr_t) : bv34 =
-        (addr & (bv_left_shift((0bv58 ++ power) + 1bv64, 1bv64) - 1bv64))[33 : 0];
+    /* Extracts bits [power - 1 : 0] from addr */
+    define get_offset (power : bv6, addr: addr_t) : bv32 =
+    (bv_l_right_shift((64bv64 - (0bv58 ++ power)), bv_left_shift((64bv64 - (0bv58 ++ power)), addr)))[31:0];
 
+    /* Generates a raw address */
     function generate_addr (size : bv64) : addr_t;
 
-    // Allocate memory, takes in a size.
+    /* Get the power bits from the size */
+    function generate_power (size : bv64) : bv6;
+
+    /* Generates a CA given a size */
     procedure malloc(size : bv64)
         returns (ca : ca_t)
         modifies memory, addr_alloc, addr_is_alloc;
@@ -46,16 +54,22 @@ module main {
         var addr : addr_t;
 
         // Parts of the address
-        var padded_fixed_addr : bv34;
-        var padded_offset : bv34;
-        var upper_addr : bv24;
+        var padded_fixed_addr : bv32;
+        var padded_offset : bv32;
+        var upper_addr : bv15;
+        var s : bv1;
+        var s_prime: bv1;
 
         // Arguments for K-Cipher
-        var key : bv24; // pointer key
         var power : bv6;
         var tweak : bv24;
 
         var encrypted_slice : bv24;
+
+        // (2**power) >= size AND (2**(power-1) < size)
+        power = generate_power(size);
+        assume ((bv_left_shift(0bv58 ++ power, 1bv64) >= size)
+            && bv_left_shift(0bv58 ++ (power - 1bv6), 1bv64) < size);
 
         // generate raw physical address from the allocator
         addr = generate_addr(size);
@@ -63,42 +77,47 @@ module main {
         addr_alloc[addr] = size;
         addr_is_alloc[addr] = true;
 
-        // LAM48 format. (page 11 of C^3 spec)
-        upper_addr = addr[47 : 34];
+        // LAM48 spec
+        upper_addr = addr[46 : 32];
+        s = addr[63 : 63];
+        s_prime = addr[47 : 47];
 
         // setup the tweak
-        power = log2ceil(size);
-
         padded_offset = get_offset(power, addr);
         padded_fixed_addr = get_fixed_addr(power, addr);
+        assert ((padded_offset | padded_fixed_addr) == addr[31:0]);
 
-        // Sanity check that we extracted the correct things
-        assert ((padded_offset | padded_fixed_addr) == addr[33:0]);
+        tweak = calculate_tweak(power ++ padded_fixed_addr);
 
-        tweak = fold_op(power ++ padded_fixed_addr);
+        // Throw everything into the K-Cipher
+        encrypted_slice = k_cipher(0bv9 ++ upper_addr, pointer_key, tweak);
 
-        // k-cipher, return cryptographic address 
-        encrypted_slice = k_cipher(upper_addr, key, tweak);
-        ca = power ++ encrypted_slice ++ addr[33 : 0];
+        // Return CA as defined in spec, rev. 0.5
+        ca = s ++ power ++ encrypted_slice[23 : 15]
+                ++ s_prime ++ encrypted_slice[14 : 0] ++ addr[31 : 0];
     }
 
     init {
-        // no allocations, all set to 0.
         assume (forall (i : addr_t) :: addr_alloc[i] == 0bv64);
-        //assume (forall (i : addr_t) :: addr_is_alloc[i] == false);
+        assume (forall (i : addr_t) :: addr_is_alloc[i] == false);
     }
 
-    next {
-        /*
-        var s   : bv64;
-        var allocation  : ca_t;
-        assume (s > 0bv64);
+    /**
+    * Testbench
+    */
+    var alloc : ca_t;
 
-        'allocation = malloc(s);
-        */
+    next {
+        var size : bv64;
+        assume (size > 0bv64);
+        call (alloc') = malloc(size);
     }
 
     control {
+        f = bmc(5);
+        check;
+        f.print_cex();
+        print_results;
     }
 
 }
