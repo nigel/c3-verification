@@ -3,7 +3,7 @@ module main {
     /* Type encoding */
     type addr_t = bv64;
     type ca_t = bv64;
-    type data_t = bv64;
+    type data_t = bv8;
     type pid_t = bv1;
     type mem_t = [addr_t]data_t; // byte addressable memory
 
@@ -22,6 +22,8 @@ module main {
 
     /* spec p14 defines maximum allocation size */
     define MAX_ALLOC_SIZE() : bv64 = 4000000000bv64;
+    define S_PRIME_IDX() : integer = 47;
+    define S_IDX() : integer = 63;
 
     /* Calculates the tweak to be used with K-Cipher */
     define calculate_tweak(arg : bv38) : bv24 =
@@ -54,12 +56,12 @@ module main {
     /* Generates a CA given a size */
     procedure malloc(size : bv64)
         returns (ca : ca_t)
-        modifies addr_is_alloc;
-        requires ((size > 0bv64) && (size <= MAX_ALLOC_SIZE()));
+        modifies addr_is_alloc, prev_raw, memory;
+        requires ((size >_u 0bv64) && (size <=_u MAX_ALLOC_SIZE()));
     {
         // The address we generate given the size.
         var addr : addr_t;
-        var _addr : addr_t;
+        var _i  : bv64;
 
         // Parts of the address
         var padded_fixed_addr : bv32;
@@ -74,26 +76,34 @@ module main {
 
         var encrypted_slice : bv24;
 
-        // (2**power) >= size AND (2**(power-1) < size)
-        power = generate_power(size);
-        assume ((bv_left_shift(0bv58 ++ power, 1bv64) >= size)
-            && bv_left_shift(0bv58 ++ (power - 1bv6), 1bv64) < size);
-        power = power + 1bv6;
-
         // Generate address and make sure it has enough space.
         addr = generate_addr(size);
-        assume (forall (i : bv64) :: ((i >= 0bv64) &&
-            (i < size)) ==> (addr_is_alloc[addr + i] == false));
-        _addr = addr;
-        while (_addr <= (addr + size)) {
-            addr_is_alloc[_addr] = true;
-            _addr = addr + 1bv64;
+
+        // TODO for testing
+        assume (forall (i : bv64) :: ((i >=_u 0bv64) &&
+            (i <_u size)) ==> (addr_is_alloc[addr + i] == false));
+        _i = 0bv64;
+
+        while (_i <_u size)
+            invariant ((_i >=_u 0bv64) && (_i <=_u size));
+            invariant (forall (i : bv64) :: (i >= 0bv64 && i < _i) ==> ((memory[addr + i] == 0bv8)));
+        {
+            addr_is_alloc[addr + _i] = true;
+            memory[addr + _i] = 0bv8;
+            _i = _i + 1bv64;
         }
+
+        // generate power, assign power of two slot
+        power = generate_power(size);
+        assume (bv_l_right_shift(0bv58 ++ power,
+            addr ^ (addr + (size - 1bv64))) == 0bv64);
+        power = power + 1bv6;
+        prev_raw = addr;
 
         // LAM48 spec
         upper_addr = addr[46 : 32];
-        s = addr[63 : 63];
-        s_prime = addr[47 : 47];
+        s = addr[S_IDX() : S_IDX()];
+        s_prime = addr[S_PRIME_IDX() : S_PRIME_IDX()];
 
         // setup the tweak
         padded_offset = get_offset(power, addr);
@@ -110,7 +120,77 @@ module main {
                 ++ s_prime ++ encrypted_slice[14 : 0] ++ addr[31 : 0];
     }
 
+    var page_fault : boolean;
+    var herro : bv64;
+
+    /* Read a byte */
+    procedure read_byte(ca : ca_t)
+        returns (byte : data_t)
+        modifies page_fault, herro;
+        requires (ca >=_u 0bv64);
+    {
+        // Bounds checking variables
+        var slot_start : bv64;
+        var slot_end : bv64;
+
+        var decoded_addr : addr_t;
+        var power : bv6;
+        power = ca[62 : 57];
+        call (decoded_addr) = decode_addr(ca);
+        assert (prev_raw == decoded_addr);
+        herro = decoded_addr;
+
+        // Get slot start
+        slot_start = bv_left_shift(0bv58 ++ (power - 1bv6),
+            bv_l_right_shift(0bv58 ++ (power - 1bv6), decoded_addr));
+
+        slot_end = bv_left_shift(0bv58 ++ (power - 1bv6),
+            bv_l_right_shift(0bv58 ++ (power - 1bv6), decoded_addr) + 1bv64);
+
+        slot_end = slot_end - 1bv64;
+
+        page_fault = (decoded_addr <_u slot_start)
+            || (decoded_addr >_u slot_end);
+
+        if (page_fault) {
+            byte = 13bv8;
+        } else {
+            byte = memory[decoded_addr];
+        }
+    }
+
+    /* Decodes the CA back to the raw address */
+    procedure decode_addr(ca : ca_t)
+        returns (decoded_addr : addr_t)
+        requires (ca >=_u 0bv64);
+    {
+        var ciphertext : bv24;
+        var power : bv6;
+        var padded_fixed_addr : bv32;
+        var tweak : bv24;
+
+        var plain_addr : bv15;
+
+        power = ca[62 : 57];
+        ciphertext = ca[56 : 48] ++ ca[46 : 32];
+        padded_fixed_addr = get_fixed_addr(power, ca);
+        tweak = calculate_tweak(power ++ padded_fixed_addr);
+        plain_addr = k_cipher(ciphertext, pointer_key, tweak)[14 : 0];
+
+        decoded_addr = ca[S_IDX() : S_IDX()]
+            ++ bv_sign_extend(15, ca[S_PRIME_IDX() : S_PRIME_IDX()])
+            ++ plain_addr ++ ca[31 : 0];
+    }
+
     init {
+        alloc = 0bv64;
+        prev_raw = 0bv64;
+
+        herro = 0bv64;
+        page_fault = false;
+        alloc_raw = 0bv64;
+        byte = 0bv8;
+        size = 1bv64;
         assume (forall (i : addr_t) :: addr_is_alloc[i] == false);
     }
 
@@ -118,15 +198,29 @@ module main {
     * Testbench
     */
     var alloc : ca_t;
+    var prev_raw : addr_t;
+    var alloc_raw : addr_t;
+    var byte : data_t;
+    var size : bv64;
+
+    invariant valid_access_1 : page_fault == false;
+    invariant valid_access_2 : byte == 0bv8;
+
+    axiom size_lim : ((size >_u 0bv64) && (size <=_u MAX_ALLOC_SIZE())); 
 
     next {
-        var size : bv64;
-        assume ((size > 0bv64) && (size <= MAX_ALLOC_SIZE()));
+        havoc size;
+
         call (alloc') = malloc(size);
+        call (alloc_raw') = decode_addr(alloc');
+        
+        assert (prev_raw' == alloc_raw');
+
+        pointer_key' = pointer_key;
     }
 
     control {
-        f = bmc(5);
+        f = bmc(2);
         check;
         f.print_cex();
         print_results;
