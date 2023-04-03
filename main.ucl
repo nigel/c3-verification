@@ -14,9 +14,6 @@ module main {
     // TODO pointer_key and data_key will need to be per process.
     // spec 0.5 says these keys should be 72 bits
 
-    /* Specifies the size of a given allocation */
-    //var addr_alloc  :   [addr_t]bv64;
-
     /* True if there's an active allocation of addr_t (for allocator use) */
     var addr_is_alloc  :   [addr_t]boolean;
 
@@ -79,7 +76,9 @@ module main {
         // Generate address and make sure it has enough space.
         addr = generate_addr(size);
 
-        // TODO for testing
+        // LAM48 canonical checks
+        assume (addr[62 : 47] == bv_sign_extend(15, addr[S_IDX() : S_IDX()])
+            && addr[63 : 63] == addr[S_PRIME_IDX() : S_PRIME_IDX()]);
         assume (forall (i : bv64) :: ((i >=_u 0bv64) &&
             (i <_u size)) ==> (addr_is_alloc[addr + i] == false));
         _i = 0bv64;
@@ -120,47 +119,22 @@ module main {
                 ++ s_prime ++ encrypted_slice[14 : 0] ++ addr[31 : 0];
     }
 
-    var page_fault : boolean;
-    var herro : bv64;
 
-    /* Read a byte */
+
+    /* Read a byte (unprotected read)*/
     procedure read_byte(ca : ca_t)
         returns (byte : data_t)
-        modifies page_fault, herro;
         requires (ca >=_u 0bv64);
     {
-        // Bounds checking variables
-        var slot_start : bv64;
-        var slot_end : bv64;
-
         var decoded_addr : addr_t;
-        var power : bv6;
-        power = ca[62 : 57];
         call (decoded_addr) = decode_addr(ca);
-        assert (prev_raw == decoded_addr);
-        herro = decoded_addr;
 
-        // Get slot start
-        slot_start = bv_left_shift(0bv58 ++ (power - 1bv6),
-            bv_l_right_shift(0bv58 ++ (power - 1bv6), decoded_addr));
+        byte = memory[decoded_addr];
 
-        slot_end = bv_left_shift(0bv58 ++ (power - 1bv6),
-            bv_l_right_shift(0bv58 ++ (power - 1bv6), decoded_addr) + 1bv64);
-
-        slot_end = slot_end - 1bv64;
-
-        page_fault = (decoded_addr <_u slot_start)
-            || (decoded_addr >_u slot_end);
-
-        if (page_fault) {
-            byte = 13bv8;
-        } else {
-            byte = memory[decoded_addr];
-        }
     }
 
     /* Decodes the CA back to the raw address */
-    procedure decode_addr(ca : ca_t)
+    procedure [inline] decode_addr(ca : ca_t)
         returns (decoded_addr : addr_t)
         requires (ca >=_u 0bv64);
     {
@@ -182,15 +156,36 @@ module main {
             ++ plain_addr ++ ca[31 : 0];
     }
 
+    /* Return TRUE if there's a page fault */
+    procedure [inline] check_bounds(ca : ca_t, size : bv64)
+        returns (pf : boolean)
+        requires ((ca >=_u 0bv64) && (size >_u 0bv64));
+    {
+        var decoded_addr : addr_t;
+        var slot_start : bv64;
+        var slot_end : bv64;
+        var power : bv6;
+
+        call (decoded_addr) = decode_addr(ca);
+        power = ca[62 : 57];
+        slot_start = bv_left_shift(0bv58 ++ (power - 1bv6),
+            bv_l_right_shift(0bv58 ++ (power - 1bv6), decoded_addr));
+
+        slot_end = bv_left_shift(0bv58 ++ (power - 1bv6),
+            bv_l_right_shift(0bv58 ++ (power - 1bv6), decoded_addr) + 1bv64);
+
+        slot_end = slot_end - 1bv64;
+
+        pf = (ca <_u slot_start) || ((ca + size) >_u slot_end);
+    }
+
     init {
         alloc = 0bv64;
         prev_raw = 0bv64;
-
-        herro = 0bv64;
-        page_fault = false;
         alloc_raw = 0bv64;
         byte = 0bv8;
         size = 1bv64;
+        state = true;
         assume (forall (i : addr_t) :: addr_is_alloc[i] == false);
     }
 
@@ -202,25 +197,29 @@ module main {
     var alloc_raw : addr_t;
     var byte : data_t;
     var size : bv64;
+    var state : boolean;
+    var offset : bv64;
 
-    invariant valid_access_1 : page_fault == false;
-    invariant valid_access_2 : byte == 0bv8;
+    invariant invalid_read_property : byte == 0bv8;
 
     axiom size_lim : ((size >_u 0bv64) && (size <=_u MAX_ALLOC_SIZE())); 
 
     next {
         havoc size;
+        havoc offset;
 
-        call (alloc') = malloc(size);
-        call (alloc_raw') = decode_addr(alloc');
-        
-        assert (prev_raw' == alloc_raw');
+        if (state) {
+            call (alloc') = malloc(size);
+        } else {
+            call (byte') = read_byte(alloc');
+        }
 
+        state' = !state;
         pointer_key' = pointer_key;
     }
 
     control {
-        f = bmc(2);
+        f = bmc(5);
         check;
         f.print_cex();
         print_results;
