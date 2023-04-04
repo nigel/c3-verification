@@ -11,7 +11,7 @@ using namespace std;
 #define MEM_SIZE 1 << 64
 #define S_IDX 63
 #define S_PRIME_IDX 47
-#define POWER_LIMIT 34
+#define MAX_POWER 34
 
 // Macro: bv[start:end]
 #define __BVSLICE__(x, start, end) ((x >> end) & ((1 << (start + 1 - end)) - 1))
