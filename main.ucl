@@ -59,6 +59,7 @@ module main {
         // The address we generate given the size.
         var addr : addr_t;
         var _i  : bv64;
+        var __i  : bv64;
 
         // Parts of the address
         var padded_fixed_addr : bv32;
@@ -67,10 +68,11 @@ module main {
         var s : bv1;
         var s_prime: bv1;
 
-        // Arguments for K-Cipher
         var power : bv6;
-        var tweak : bv24;
+        var temp_addr : addr_t;
 
+        // Arguments for K-Cipher
+        var tweak : bv24;
         var encrypted_slice : bv24;
 
         // Generate address and make sure it has enough space.
@@ -85,18 +87,27 @@ module main {
 
         while (_i <_u size)
             invariant ((_i >=_u 0bv64) && (_i <=_u size));
-            invariant (forall (i : bv64) :: (i >= 0bv64 && i < _i) ==> ((memory[addr + i] == 0bv8)));
+            invariant (forall (i : bv64) ::
+                (i >= 0bv64 && i < _i) ==> ((memory[addr + i] == 0bv8)));
         {
             addr_is_alloc[addr + _i] = true;
             memory[addr + _i] = 0bv8;
             _i = _i + 1bv64;
         }
 
-        // generate power, assign power of two slot
-        power = generate_power(size);
-        assume (bv_l_right_shift(0bv58 ++ power,
-            addr ^ (addr + (size - 1bv64))) == 0bv64);
-        power = power + 1bv6;
+        // Power computation
+        __i = 1bv64;
+        temp_addr = addr + size;
+        while (temp_addr != 1bv64)
+            invariant ((__i >=_u 0bv64) && (__i <=_u 64bv64));
+            invariant (temp_addr >=_u 1bv64);
+        {
+            temp_addr = bv_l_right_shift(1bv64, temp_addr);
+            __i = __i + 1bv64;
+        }
+        power = __i[5 : 0];
+        assert (power <_u 34bv6);
+
         prev_raw = addr;
 
         // LAM48 spec
@@ -119,8 +130,6 @@ module main {
                 ++ s_prime ++ encrypted_slice[14 : 0] ++ addr[31 : 0];
     }
 
-
-
     /* Read a byte (unprotected read)*/
     procedure read_byte(ca : ca_t)
         returns (byte : data_t)
@@ -130,11 +139,10 @@ module main {
         call (decoded_addr) = decode_addr(ca);
 
         byte = memory[decoded_addr];
-
     }
 
     /* Decodes the CA back to the raw address */
-    procedure [inline] decode_addr(ca : ca_t)
+    procedure decode_addr(ca : ca_t)
         returns (decoded_addr : addr_t)
         requires (ca >=_u 0bv64);
     {
@@ -157,7 +165,7 @@ module main {
     }
 
     /* Return TRUE if there's a page fault */
-    procedure [inline] check_bounds(ca : ca_t, size : bv64)
+    procedure check_bounds(ca : ca_t, size : bv64)
         returns (pf : boolean)
         requires ((ca >=_u 0bv64) && (size >_u 0bv64));
     {
