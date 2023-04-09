@@ -11,4 +11,4 @@ ${ODIR}/main: $(OBJS) c3_model.h
 .PHONY: clean
 
 clean:
-	rm -f $(OBJS) ./bin/*
+	rm -f $(OBJS) ./bin/* ./*.o
