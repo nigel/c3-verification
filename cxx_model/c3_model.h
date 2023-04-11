@@ -103,8 +103,49 @@ private:
     data_key_t pointer_key;
     data_key_t data_key;
 
+    uint64_t get_power (uint64_t base, uint64_t size) {
+        assert(base + size <= MEM_SIZE);
+        uint64_t power = (64ULL - __builtin_clzll((base ^ (base + size)) & ((1ULL << MAX_POWER) - 1ULL)));
+        assert(power <= MAX_POWER);
+        return power;
+    }
+
+    uint64_t data_keystream_module (uint64_t ca) {
+        // (x^2) ^ data_key  + 1
+        return (((ca * ca) ^ data_key) + 1) % (1ULL << 63);
+    }
+
+    char read_byte_c3(uint64_t ca) {
+        uint64_t power = __BVSLICE__(ca, 62, 57);
+        uint64_t offset = __BVSLICE__(ca, (power - 1), 0) % 8;
+
+        /* Encrypting data */
+        uint64_t keystream = data_keystream_module(ca & (~15ULL));
+        char mask = __BVSLICE__(keystream, offset * 8, offset * 8 + 8);
+
+        /* Decrypting CA */
+        char *addr = (char *) decode_addr_c3(ca);
+
+        return (char) (*addr ^ mask);
+    }
+
     uint64_t get_fixed_addr(uint64_t ca, uint64_t power) {
         return __BVSLICE__(ca, 31, power);
+    }
+
+    void store_byte_c3 (uint64_t ca, char byte) {
+        uint64_t power = __BVSLICE__(ca, 62, 57);
+        uint64_t offset = __BVSLICE__(ca, (power - 1), 0) % 8;
+
+        /* Encrypting data */
+        uint64_t keystream = data_keystream_module(ca & (~15ULL));
+        char mask = __BVSLICE__(keystream, offset * 8, offset * 8 + 8);
+        char enc = byte ^ mask;
+
+        /* Decrypting CA */
+        char *addr = (char *) decode_addr_c3(ca);
+
+        *addr = enc;
     }
 
     uint64_t decode_addr_c3 (uint64_t ca) {
@@ -133,43 +174,35 @@ public:
         data_key = __BVSLICE__(TEMP_KEY, 24, 0);
     }
 
-    uint64_t get_power (uint64_t base, uint64_t size) {
-        assert(base + size <= MEM_SIZE);
-        uint64_t power = (64ULL - __builtin_clzll((base ^ (base + size)) & ((1ULL << MAX_POWER) - 1ULL)));
-        assert(power <= MAX_POWER);
-        return power;
-    }
-
-    uint64_t data_keystream_module (uint64_t ca) {
-        // (x^2) ^ data_key  + 1
-        return (((ca * ca) ^ data_key) + 1) % (1ULL << 63);
-    }
-
-    void store_byte_c3 (uint64_t ca, char byte) {
-        uint64_t power = __BVSLICE__(ca, 62, 57);
-        uint64_t offset = __BVSLICE__(ca, (power - 1), 0) % 8;
-
-        /* Encrypting data */
-        uint64_t keystream = data_keystream_module(ca & (~15ULL));
-        char mask = __BVSLICE__(keystream, offset, offset);
-        char enc = byte ^ mask;
-
-        /* Decrypting CA */
-        char *addr = (char *) decode_addr_c3(ca);
-
-        *addr = enc;
-    }
-
     void store_c3 (uint64_t ca, string data, uint64_t size) {
         uint64_t i;
         uint64_t power = __BVSLICE__(ca, 62, 57);
 
         if (size >= (1ULL << power)) {
+            std::cout << "Write OOB error" << endl;
             return;
         }
         for (i = 0; i < size; i += 1) {
             store_byte_c3(ca + i, data[i]);
         }
+    }
+
+    string* read_c3 (uint64_t ca, uint64_t size) {
+        uint64_t i;
+        uint64_t power = __BVSLICE__(ca, 62, 57);
+
+        if (size >= (1ULL << power)) {
+            std::cout << "Read OOB error" << endl;
+            return nullptr;
+        }
+
+        string *retval = new string();
+
+        for (i = 0; i < size; i += 1) {
+            retval->append(1, read_byte_c3(ca + i));
+        }
+
+        return retval;
     }
 
     uint64_t malloc_c3 (uint64_t size) {

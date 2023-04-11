@@ -15,9 +15,14 @@ int main(void) {
 
     cout << "Encrypted Address: " << hex << ptr << endl;
 
-    string dat = "AAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    string dat = "Hello World";
 
-    model.store_c3(ptr, dat, 12);
+    model.store_c3(ptr, dat, 11);
+    string *lol = model.read_c3(ptr, 11);
+
+    cout << "Decrypted: " << *lol << endl;
+
+    delete lol;
 
     return 0;
 }
