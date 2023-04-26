@@ -14,15 +14,14 @@ int main(void) {
     }
 
     cout << "Encrypted Address: " << hex << ptr << endl;
+    cout << "WRITING WITHIN BOUNDS" << endl;
+    model.store_c3(ptr + 5, 11);
+    cout << "READING OOB" << endl;
+    bool res = model.read_c3(ptr + 9, 11); // read +4 bytes OOB
+    cout << endl;
 
-    string dat = "Hello World";
-
-    model.store_c3(ptr, dat, 11);
-    string *lol = model.read_c3(ptr, 11);
-
-    cout << "Decrypted: " << *lol << endl;
-
-    delete lol;
+    // assertion fails
+    assert (res);
 
     return 0;
 }

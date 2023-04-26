@@ -1,8 +1,8 @@
 #include <assert.h>
 #include <iostream>
-#include <vector>
 #include <climits>
 #include <cstdlib>
+#include <vector>
 #include <cmath>
 
 using namespace std;
@@ -28,86 +28,95 @@ using namespace std;
 typedef uint64_t word_t;
 typedef uint64_t data_key_t;
 
-/* Memory interface */
-class lazy_mem {
-
-    struct alloc_t {
-        uint64_t base;
-        uint64_t size;
-    };
-
-public:
-    vector<alloc_t *> mem;
-
-    uint64_t mem_size;
-
-    bool is_alloc (uint64_t addr) {
-        for (size_t i = 0; i < mem.size(); i++) {
-            if (addr >= mem[i]->base && addr < mem[i]->base + mem[i]->size) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    uint64_t make_alloc (uint64_t size) {
-        void *base = malloc(size);
-        assert (base != NULL);
-        return (uint64_t) base;
-        /*
-        uint64_t base = start;
-        vector<alloc_t *>::iterator it_ins = mem.begin();
-        for (vector<alloc_t *>::iterator it = mem.begin(); it != mem.end(); it++) {
-            alloc_t *_alloc = *it;
-
-            if (_alloc->base - base >= size) {
-                it_ins = it;
-                break;
-            }
-            base = _alloc->base + _alloc->size;
-        }
-        if (mem_size - base < size) {
-            return MEM_SIZE;
-        }
-        alloc_t *a = (alloc_t *) calloc(sizeof(alloc_t) + size, 1);
-        a->base = base;
-        a->size = size;
-        mem.insert(it_ins++, a);
-        return base;
-        */
-    }
-
-    void print_mem () {
-        cout << "Memory: " << endl;
-        for (vector<alloc_t *>::iterator it = mem.begin(); it != mem.end(); it++) {
-            alloc_t *_alloc = *it;
-            cout << "[" << _alloc->base << ", " << _alloc->size + _alloc->base << "] ";
-        }
-        cout << endl;
-    }
-
-    lazy_mem (uint64_t size) : mem_size(size) { }
-
-};
-
-typedef struct {
-    uint64_t power;
-    
-} ca_t;
-
-
 /* C3 Wrapped API of memory */
 class c3_model {
 
 private:
+
+    /* start of memory safety monitor */
+    typedef enum {
+        ENCRYPTED,
+        UNINITIALIZED,
+        GARBLED
+    } alloc_state_t;
+
+    struct alloc_t {
+        uint64_t ca; // CA with the offset bits masked out
+        data_key_t data_key;
+        data_key_t pointer_key;
+        alloc_state_t state;
+        bool allocated; // Is this allocation active? (not freed/unitialized)
+    };
+
+    std::vector<alloc_t *> mem_arr;
+
+    /* Returns all the alloc_t's associated w/ "ca" using the "p_key". Stores them into "vec" */
+    void find_allocs_from_ca (uint64_t ca, vector<alloc_t *> *vec, data_key_t p_key) {
+        for (alloc_t *i : mem_arr) {
+            if ((i->ca == ca) && (i->pointer_key == p_key)) {
+                vec->push_back(i);
+            }
+        }
+    }
+
+
+    /* Adds entry to the mem_arr */
+    void add_to_mem_arr(uint64_t ca, data_key_t pointer_key,
+            alloc_state_t state = UNINITIALIZED, data_key_t d_key = 0, bool allocated = true) {
+        // TODO find existing allocs
+
+        std::vector<alloc_t *> allocs;
+        find_allocs_from_ca (ca, &allocs, pointer_key);
+
+        assert((allocs.size() == 1) || (allocs.size() == 0));
+
+        if ((allocs.size() != 0) && (!allocs[0]->allocated)) {
+            allocs[0]->allocated = true;
+            return;
+        }
+
+        alloc_t *_alloc = (alloc_t *) calloc(sizeof(alloc_t), 1);
+        assert (_alloc != 0);
+
+        _alloc->state = state;
+        _alloc->ca = ca;
+        _alloc->pointer_key = pointer_key;
+        _alloc->data_key = d_key;
+        _alloc->allocated = allocated;
+        mem_arr.push_back(_alloc);
+    }
+
+
+    /* end of memory safety monitor */
+
     data_key_t pointer_key;
     data_key_t data_key;
 
+    // From malloc/try_box
+    // https://github.com/IntelLabs/c3-simulator/blob/b01f1ea97979327be420ed0eb8f7cb8a8e759e04/malloc/try_box.h
     uint64_t get_power (uint64_t base, uint64_t size) {
-        assert(base + size <= MEM_SIZE);
+        assert (base + size <= MEM_SIZE);
+        /*
         uint64_t power = (64ULL - __builtin_clzll((base ^ (base + size)) & ((1ULL << MAX_POWER) - 1ULL)));
-        assert(power <= MAX_POWER);
-        return power;
+        */
+		size = (size < (1UL << 0) ? (1UL << 0) : size);
+		size_t max_off = size - 1;
+		uint64_t ptr_end = base + max_off;
+		uint64_t diff = base ^ ptr_end;
+		uint64_t leading_zeros_in_diff = (diff == 0 ? 64 : __builtin_clzl(diff));
+
+		if (leading_zeros_in_diff < 32) {
+            assert (false);
+			return 0;
+		}
+		uint8_t enc_size = (uint8_t)(64 - leading_zeros_in_diff);
+
+        printf("Enc_size: %u\n", enc_size);
+
+        assert (enc_size < 34);
+        assert (enc_size >= 1);
+
+		return enc_size;
     }
 
     uint64_t data_keystream_module (uint64_t ca) {
@@ -115,37 +124,56 @@ private:
         return (((ca * ca) ^ data_key) + 1) % (1ULL << 63);
     }
 
-    char read_byte_c3(uint64_t ca) {
-        uint64_t power = __BVSLICE__(ca, 62, 57);
-        uint64_t offset = __BVSLICE__(ca, (power - 1), 0) % 8;
+    char read_byte_c3(uint64_t ca, data_key_t data_key, data_key_t pointer_key) {
 
-        /* Encrypting data */
-        uint64_t keystream = data_keystream_module(ca & (~15ULL));
-        char mask = __BVSLICE__(keystream, offset * 8, offset * 8 + 8);
+        std::vector<alloc_t *> allocs;
+        find_allocs_from_ca(ca, &allocs, pointer_key);
 
-        /* Decrypting CA */
-        char *addr = (char *) decode_addr_c3(ca);
+        // sanity check
+        assert(allocs.size() == 1);
 
-        return (char) (*addr ^ mask);
+        alloc_t *a = allocs[0];
+
+        return a->data_key == data_key;
     }
 
     uint64_t get_fixed_addr(uint64_t ca, uint64_t power) {
         return __BVSLICE__(ca, 31, power);
     }
 
-    void store_byte_c3 (uint64_t ca, char byte) {
-        uint64_t power = __BVSLICE__(ca, 62, 57);
-        uint64_t offset = __BVSLICE__(ca, (power - 1), 0) % 8;
-
-        /* Encrypting data */
+    void store_byte_c3 (uint64_t ca) {
+        /* Encrypting data
         uint64_t keystream = data_keystream_module(ca & (~15ULL));
         char mask = __BVSLICE__(keystream, offset * 8, offset * 8 + 8);
         char enc = byte ^ mask;
 
-        /* Decrypting CA */
         char *addr = (char *) decode_addr_c3(ca);
 
         *addr = enc;
+        */
+
+        std::vector<alloc_t *> allocs;
+        find_allocs_from_ca(ca, &allocs, pointer_key);
+
+        // Empty result vector, must be an OOB or UAF
+        if (allocs.empty()) {
+            add_to_mem_arr(ca,
+                    pointer_key,
+                    ENCRYPTED,
+                    data_key,
+                    false);
+            return;
+        }
+
+        assert(allocs.size() == 1);
+
+        // Overwrite the previous, shit's now encrypted with new data
+        for (alloc_t *i : allocs) {
+            // assuming that CAs dont map to same LAs
+            i->state = ENCRYPTED;
+            i->data_key = data_key;
+        }
+
     }
 
     uint64_t decode_addr_c3 (uint64_t ca) {
@@ -166,52 +194,37 @@ private:
 
 public:
 
-    lazy_mem mem = lazy_mem(MEM_SIZE);
-
     c3_model() {
         srand (time(NULL));
         pointer_key = __BVSLICE__(TEMP_KEY, 24, 0);
         data_key = __BVSLICE__(TEMP_KEY, 24, 0);
     }
 
-    void store_c3 (uint64_t ca, string data, uint64_t size) {
-        uint64_t i;
-        uint64_t power = __BVSLICE__(ca, 62, 57);
-
-        if (size >= (1ULL << power)) {
-            std::cout << "Write OOB error" << endl;
-            return;
-        }
-        for (i = 0; i < size; i += 1) {
-            store_byte_c3(ca + i, data[i]);
+    void store_c3 (uint64_t ca, uint64_t size) {
+        for (uint64_t i = 0; i < size; i += 1) {
+            store_byte_c3(ca + i);
         }
     }
 
-    string* read_c3 (uint64_t ca, uint64_t size) {
+    /* Returns true if the READ did not violate confidentiality properties */
+    bool read_c3 (uint64_t ca, uint64_t size) {
         uint64_t i;
-        uint64_t power = __BVSLICE__(ca, 62, 57);
-
-        if (size >= (1ULL << power)) {
-            std::cout << "Read OOB error" << endl;
-            return nullptr;
-        }
-
-        string *retval = new string();
-
         for (i = 0; i < size; i += 1) {
-            retval->append(1, read_byte_c3(ca + i));
+            printf("checking byte %lu\n", i);
+            if (!read_byte_c3(ca + i, data_key, pointer_key)) {
+                printf("CONFIDENTIALITY VIOLATION ON BYTE %lu\n", i);
+                return false;
+            }
         }
 
-        return retval;
+        return true;
     }
 
     uint64_t malloc_c3 (uint64_t size) {
-        uint64_t base = mem.make_alloc(size);
-        if (base == MEM_SIZE) {
-            return MEM_SIZE;
-        }
+        uint64_t base = (uint64_t) malloc(size);
         std::cout << "Raw addr : " << hex << base << std::endl;
-        
+
+        // Create CA
         uint64_t power = get_power(base, size);
         
         uint64_t sign = __BVSLICE__(base, S_IDX, S_IDX);
@@ -224,10 +237,17 @@ public:
         uint64_t encrypted_slice = __K_CIPHER__(upper_addr, pointer_key, tweak);
         uint64_t upper_encrypted = __BVSLICE__(encrypted_slice, 23, 15);
         uint64_t lower_encrypted = __BVSLICE__(encrypted_slice, 14, 0);
-
-        return (sign << 63) | (power << 57) | (upper_encrypted << 48)
+        uint64_t ca = (sign << 63) | (power << 57) | (upper_encrypted << 48)
             | (s_prime << 47) | (lower_encrypted << 32)
             | (__BVSLICE__(base, 31, 0));
+
+        printf("Power: %ld\n", power);
+
+        // Initialize the mem safety monitor entry
+        for (uint64_t i = 0; i < size; i += 1)
+            add_to_mem_arr(ca + i, pointer_key);
+
+        return ca;
     }
 
 };
