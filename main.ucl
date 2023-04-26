@@ -42,13 +42,14 @@ module main {
         (bv_l_right_shift((64bv64 - (0bv58 ++ power)),
             bv_left_shift((64bv64 - (0bv58 ++ power)), addr)))[31:0];
 
+    // TODO should be pseudorandom
+    /*
+    define data_keystream_module (ca : ca_t, key : bv24) : bv64 =
+        key ^ ca[23 : 0] ^ ca[47 : 24] ^ (0bv9 ++ ca[63 : 48]);
+    */
+
     /* Generates a raw address */
     function generate_addr (size : bv64) : addr_t;
-
-    /* Get the power bits from the size */
-    function generate_power (size : bv64) : bv6;
-
-    define begin (): bv64 = 0bv64;
 
     /* Generates a CA given a size */
     procedure malloc(size : bv64)
@@ -96,17 +97,11 @@ module main {
         }
 
         // Power computation
-        __i = 1bv64;
-        temp_addr = addr + size;
-        while (temp_addr != 1bv64)
-            invariant ((__i >=_u 0bv64) && (__i <=_u 64bv64));
-            invariant (temp_addr >=_u 1bv64);
-        {
-            temp_addr = bv_l_right_shift(1bv64, temp_addr);
-            __i = __i + 1bv64;
-        }
-        power = __i[5 : 0];
+        assume (bv_l_right_shift(0bv58 ++ power, size) == 1bv64);
+        power = power + 1bv6;
+
         assert (power <_u 34bv6);
+        assert (power >=_u 1bv6);
 
         prev_raw = addr;
 
@@ -209,7 +204,6 @@ module main {
     var offset : bv64;
 
     invariant invalid_read_property : byte == 0bv8;
-
     axiom size_lim : ((size >_u 0bv64) && (size <=_u MAX_ALLOC_SIZE())); 
 
     next {
@@ -227,7 +221,7 @@ module main {
     }
 
     control {
-        f = bmc(5);
+        f = bmc(2);
         check;
         f.print_cex();
         print_results;
