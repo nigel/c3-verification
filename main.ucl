@@ -5,20 +5,42 @@ module main {
     type ca_t = bv64;
     type data_t = bv8;
     type pid_t = bv1;
-    type mem_t = [addr_t]data_t; // byte addressable memory
 
     /* State variables */
-    var memory      :   mem_t;
     var pointer_key :   bv24;
     var data_key    :   bv24;
     // TODO pointer_key and data_key will need to be per process.
     // spec 0.5 says these keys should be 72 bits
 
-    /* True if there's an active allocation of addr_t (for allocator use) */
-    var addr_is_alloc  :   [addr_t]boolean;
+    /*****
+    =================================================================================
+    Start of memory safety monitor mappings */
+
+    // ASSUMPTION THAT ALL CA'S ARE UNIQUE, DESPITE MULTIPLE PROCS
+    type alloc_state_t = enum {ENCRYPTED, UNINITIALIZED};
+
+    var alloc_d_keys  :   [ca_t]bv24;
+    var alloc_p_keys  :   [ca_t]bv24;
+    var alloc_state   :   [ca_t]alloc_state_t;
+
+    // determines if the other arrays are valid or not
+    // use this to check for existence of an allocation
+    var alloc_valid   :   [ca_t]boolean;  
+
+    //determines if memory allocator allocated this entry or not
+    // if false, then it's most likely a product of a memory violation
+    var alloc_allocated :   [ca_t]boolean;
+
+    // true if there's an encrypted slice that exists
+    var alloc_encrypted_slices : [bv24]boolean;
+
+    // true if raw address has been taken up
+    var addr_is_alloc : [addr_t]boolean;
+    /* ===============================================================================
+    End of memory safety monitor variables */
 
     /* spec p14 defines maximum allocation size */
-    define MAX_ALLOC_SIZE() : bv64 = 4000000000bv64;
+    define MAX_ALLOC_SIZE() : bv64 = 1bv64;
     define S_PRIME_IDX() : integer = 47;
     define S_IDX() : integer = 63;
 
@@ -42,25 +64,24 @@ module main {
         (bv_l_right_shift((64bv64 - (0bv58 ++ power)),
             bv_left_shift((64bv64 - (0bv58 ++ power)), addr)))[31:0];
 
-    // TODO should be pseudorandom
-    /*
-    define data_keystream_module (ca : ca_t, key : bv24) : bv64 =
-        key ^ ca[23 : 0] ^ ca[47 : 24] ^ (0bv9 ++ ca[63 : 48]);
-    */
-
     /* Generates a raw address */
     function generate_addr (size : bv64) : addr_t;
 
     /* Generates a CA given a size */
-    procedure malloc(size : bv64)
+    procedure malloc(size : bv64, pkey : bv24)
         returns (ca : ca_t)
-        modifies addr_is_alloc, prev_raw, memory;
-        requires ((size >_u 0bv64) && (size <=_u MAX_ALLOC_SIZE()));
+        modifies addr_is_alloc, alloc_encrypted_slices,
+            alloc_allocated, alloc_p_keys, alloc_state, alloc_valid, debug_raw, debug_raw1;
+
+        // TODO temporary, hard to reason about bigger allocation
+        requires (size == 1bv64);
+        //requires ((size >_u 0bv64) && (size <=_u MAX_ALLOC_SIZE()));
+        //ensures (alloc_allocated[ca] == true);
+        ensures ((ca + size) >_u ca);
     {
         // The address we generate given the size.
         var addr : addr_t;
-        var _i  : bv64;
-        var __i  : bv64;
+        var _i : bv64;
 
         // Parts of the address
         var padded_fixed_addr : bv32;
@@ -68,156 +89,179 @@ module main {
         var upper_addr : bv15;
         var s : bv1;
         var s_prime: bv1;
-
         var power : bv6;
-        var temp_addr : addr_t;
 
-        // Arguments for K-Cipher
-        var tweak : bv24;
         var encrypted_slice : bv24;
+        var _state : alloc_state_t;
 
-        // Generate address and make sure it has enough space.
         addr = generate_addr(size);
+
+        // make sure this isn't too big to prevent overflow
+        assume ((addr + size) >_u addr);
+        // not the upper bound, but this will do for now!
+        assume ((addr + size) <_u 18446603336221196288bv64);
 
         // LAM48 canonical checks
         assume (addr[62 : 47] == bv_sign_extend(15, addr[S_IDX() : S_IDX()])
             && addr[63 : 63] == addr[S_PRIME_IDX() : S_PRIME_IDX()]);
+
+        // addr_is_alloc alignment
         assume (forall (i : bv64) :: ((i >=_u 0bv64) &&
             (i <_u size)) ==> (addr_is_alloc[addr + i] == false));
-        _i = 0bv64;
 
+        _i = 0bv64;
         while (_i <_u size)
-            invariant ((_i >=_u 0bv64) && (_i <=_u size));
+            /*
+            // loop _i must be within bounds
+            //invariant ((_i >=_u 0bv64) && (_i <=_u size));
+            // the addr_is_alloc must be working
             invariant (forall (i : bv64) ::
-                (i >= 0bv64 && i < _i) ==> ((memory[addr + i] == 0bv8)));
+                (i >= 0bv64 && i < _i) ==> ((addr_is_alloc[addr + i] == true)));
+            */
         {
             addr_is_alloc[addr + _i] = true;
-            memory[addr + _i] = 0bv8;
             _i = _i + 1bv64;
         }
 
-        // Power computation
-        assume (bv_l_right_shift(0bv58 ++ power, size) == 1bv64);
-        power = power + 1bv6;
-
-        assert (power <_u 34bv6);
-        assert (power >=_u 1bv6);
-
-        prev_raw = addr;
-
         // LAM48 spec
-        upper_addr = addr[46 : 32];
         s = addr[S_IDX() : S_IDX()];
         s_prime = addr[S_PRIME_IDX() : S_PRIME_IDX()];
 
-        // setup the tweak
-        padded_offset = get_offset(power, addr);
-        padded_fixed_addr = get_fixed_addr(power, addr);
-        assert ((padded_offset | padded_fixed_addr) == addr[31:0]);
-
-        tweak = calculate_tweak(power ++ padded_fixed_addr);
-
-        // Throw everything into the K-Cipher
-        encrypted_slice = k_cipher(0bv9 ++ upper_addr, pointer_key, tweak);
+        // Ensure the encrypted slice is unique
+        assume (alloc_encrypted_slices[encrypted_slice] == false);
+        alloc_encrypted_slices[encrypted_slice] = true;
 
         // Return CA as defined in spec, rev. 0.5
         ca = s ++ power ++ encrypted_slice[23 : 15]
                 ++ s_prime ++ encrypted_slice[14 : 0] ++ addr[31 : 0];
+        
+        // set the allocation structure
+        _state = UNINITIALIZED;
+        /*
+        _i = 0bv64;
+        while (_i <_u size)
+            invariant ((_i >=_u 0bv64) && (_i <=_u size));
+        {
+            call set_alloc_metadata(ca + _i, pkey, _state);
+            _i = _i + 1bv64;
+        }
+        */
+        call set_alloc_metadata(ca, pkey, _state);
+
+        //debug_raw1 = alloc_allocated[0bv64];
     }
 
-    /* Read a byte (unprotected read)*/
-    procedure read_byte(ca : ca_t)
-        returns (byte : data_t)
-        requires (ca >=_u 0bv64);
+    /* Sets alloc metadata if needed */
+    procedure set_alloc_metadata(ca : ca_t, pkey : bv24, state : alloc_state_t)
+        modifies alloc_allocated, alloc_p_keys, alloc_state, alloc_valid, debug_raw1, debug_raw;
     {
-        var decoded_addr : addr_t;
-        call (decoded_addr) = decode_addr(ca);
-
-        byte = memory[decoded_addr];
+        if (alloc_valid[ca] == true) {
+            alloc_allocated[ca] = true;
+        } else {
+            alloc_p_keys[ca] = pkey;
+            alloc_state[ca] = state;
+            alloc_allocated[ca] = true;
+            alloc_valid[ca] = true;
+        }
     }
 
-    /* Decodes the CA back to the raw address */
-    procedure decode_addr(ca : ca_t)
-        returns (decoded_addr : addr_t)
+    /* Read a byte (unprotected read), returns true if successful */
+    procedure read_byte(ca : ca_t, dkey : bv24, pkey : bv24)
+        returns (success : boolean)
         requires (ca >=_u 0bv64);
     {
         var ciphertext : bv24;
-        var power : bv6;
-        var padded_fixed_addr : bv32;
-        var tweak : bv24;
-
-        var plain_addr : bv15;
-
-        power = ca[62 : 57];
         ciphertext = ca[56 : 48] ++ ca[46 : 32];
-        padded_fixed_addr = get_fixed_addr(power, ca);
-        tweak = calculate_tweak(power ++ padded_fixed_addr);
-        plain_addr = k_cipher(ciphertext, pointer_key, tweak)[14 : 0];
-
-        decoded_addr = ca[S_IDX() : S_IDX()]
-            ++ bv_sign_extend(15, ca[S_PRIME_IDX() : S_PRIME_IDX()])
-            ++ plain_addr ++ ca[31 : 0];
+        success = false;
+        /*
+        success = !((alloc_valid[ca] == false) ||
+                (alloc_encrypted_slices[ciphertext] == false))
+            && (alloc_p_keys[ca] == ciphertext)
+            && ((alloc_state[ca] == UNINITIALIZED) || ((alloc_d_keys[ca] == dkey) && (alloc_state[ca] == ENCRYPTED)));
+        */
     }
 
-    /* Return TRUE if there's a page fault */
-    procedure check_bounds(ca : ca_t, size : bv64)
-        returns (pf : boolean)
-        requires ((ca >=_u 0bv64) && (size >_u 0bv64));
+
+    /* Writes a byte */
+    procedure write_byte(ca : ca_t, dkey : bv24, pkey : bv24)
+        modifies alloc_encrypted_slices,
+            alloc_allocated, alloc_d_keys, alloc_p_keys, alloc_state, alloc_valid, debug_raw1, debug_raw;
+        ensures (alloc_valid[ca] == true);
     {
-        var decoded_addr : addr_t;
-        var slot_start : bv64;
-        var slot_end : bv64;
-        var power : bv6;
+        var _state : alloc_state_t;
+        _state = ENCRYPTED;
 
-        call (decoded_addr) = decode_addr(ca);
-        power = ca[62 : 57];
-        slot_start = bv_left_shift(0bv58 ++ (power - 1bv6),
-            bv_l_right_shift(0bv58 ++ (power - 1bv6), decoded_addr));
-
-        slot_end = bv_left_shift(0bv58 ++ (power - 1bv6),
-            bv_l_right_shift(0bv58 ++ (power - 1bv6), decoded_addr) + 1bv64);
-
-        slot_end = slot_end - 1bv64;
-
-        pf = (ca <_u slot_start) || ((ca + size) >_u slot_end);
+        if (alloc_valid[ca] == false) {
+            // OOB write
+            // assert (false);
+            call set_alloc_metadata(ca, pkey, _state);
+        } else {
+            // Regular access
+            assert (alloc_p_keys[ca] == pkey);
+            alloc_d_keys[ca] = dkey;
+            alloc_state[ca] = _state;
+        }
     }
 
     init {
         alloc = 0bv64;
-        prev_raw = 0bv64;
-        alloc_raw = 0bv64;
         byte = 0bv8;
         size = 1bv64;
-        state = true;
-        assume (forall (i : addr_t) :: addr_is_alloc[i] == false);
+        confidential = true;
+        action = MALLOC;
+
+        debug_raw1 = true;
+
+        pointer_key = 1337bv24;
+        data_key = 1337bv24;
+
+        assume (forall (i : ca_t) ::  alloc_valid[i] == false);
+        assume (forall (i : addr_t) ::  addr_is_alloc[i] == false);
+        assume (forall (i : ca_t) ::  alloc_allocated[i] == false);
+
+
+        // for some reason we need this for the proof to work
     }
 
     /**
     * Testbench
     */
+    type action_t = enum {MALLOC, WRITE, READ};
     var alloc : ca_t;
-    var prev_raw : addr_t;
-    var alloc_raw : addr_t;
     var byte : data_t;
     var size : bv64;
-    var state : boolean;
     var offset : bv64;
+    var confidential : boolean;
+    var action : action_t;
+    var debug_raw : ca_t;
+    var debug_raw1 : boolean;
 
-    invariant invalid_read_property : byte == 0bv8;
+    var herro : ca_t;
+
     axiom size_lim : ((size >_u 0bv64) && (size <=_u MAX_ALLOC_SIZE())); 
 
+    invariant confidentiality : confidential == true;
+
+    // Adversarial action
     next {
         havoc size;
-        havoc offset;
+        havoc herro;
+        havoc action;
 
-        if (state) {
-            call (alloc') = malloc(size);
-        } else {
-            call (byte') = read_byte(alloc');
-        }
+        case
+            (action == MALLOC) : {
+                call (alloc') = malloc(size, pointer_key);
+            }
 
-        state' = !state;
-        pointer_key' = pointer_key;
+            (action == WRITE) : {
+                call write_byte(alloc', data_key, pointer_key);
+            }
+
+            (action == READ) : {
+                call (confidential') = read_byte(alloc', data_key, pointer_key);
+            }
+        esac
+
     }
 
     control {

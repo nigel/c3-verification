@@ -1,4 +1,5 @@
 #include <assert.h>
+#include <algorithm>
 #include <iostream>
 #include <climits>
 #include <cstdlib>
@@ -41,13 +42,16 @@ private:
     } alloc_state_t;
 
     struct alloc_t {
-        uint64_t ca; // CA with the offset bits masked out
+        uint64_t ca;
         data_key_t data_key;
         data_key_t pointer_key;
         alloc_state_t state;
         bool allocated; // Is this allocation active? (not freed/unitialized)
     };
 
+
+    // used to generate the encrypted slice in a safe manner
+    std::vector<uint64_t> encrypted_slices;
     std::vector<alloc_t *> mem_arr;
 
     /* Returns all the alloc_t's associated w/ "ca" using the "p_key". Stores them into "vec" */
@@ -59,6 +63,14 @@ private:
         }
     }
 
+    /* Generates a unique encrypted slice */
+    // TODO shoudl take into account the PID
+    uint64_t get_encrypted_slice() {
+        uint64_t retval = rand() % (1 << 24);
+        while (std::count(encrypted_slices.begin(), encrypted_slices.end(), retval))
+            retval = rand() % (1 << 24);
+        return retval;
+    }
 
     /* Adds entry to the mem_arr */
     void add_to_mem_arr(uint64_t ca, data_key_t pointer_key,
@@ -142,16 +154,6 @@ private:
     }
 
     void store_byte_c3 (uint64_t ca) {
-        /* Encrypting data
-        uint64_t keystream = data_keystream_module(ca & (~15ULL));
-        char mask = __BVSLICE__(keystream, offset * 8, offset * 8 + 8);
-        char enc = byte ^ mask;
-
-        char *addr = (char *) decode_addr_c3(ca);
-
-        *addr = enc;
-        */
-
         std::vector<alloc_t *> allocs;
         find_allocs_from_ca(ca, &allocs, pointer_key);
 
@@ -221,6 +223,7 @@ public:
     }
 
     uint64_t malloc_c3 (uint64_t size) {
+        
         uint64_t base = (uint64_t) malloc(size);
         std::cout << "Raw addr : " << hex << base << std::endl;
 
@@ -228,15 +231,20 @@ public:
         uint64_t power = get_power(base, size);
         
         uint64_t sign = __BVSLICE__(base, S_IDX, S_IDX);
-        uint64_t upper_addr = __BVSLICE__(base, 46, 32);
+        //uint64_t upper_addr = __BVSLICE__(base, 46, 32);
         uint64_t s_prime = __BVSLICE__(base, S_PRIME_IDX, S_PRIME_IDX);
 
-        uint64_t fixed_addr = get_fixed_addr(base, power);
+        //uint64_t fixed_addr = get_fixed_addr(base, power);
+
+        /*
         uint64_t tweak = __TWEAK__((power << (31-power+1)) | fixed_addr);
-        
         uint64_t encrypted_slice = __K_CIPHER__(upper_addr, pointer_key, tweak);
+        */
+        uint64_t encrypted_slice = get_encrypted_slice();
+
         uint64_t upper_encrypted = __BVSLICE__(encrypted_slice, 23, 15);
         uint64_t lower_encrypted = __BVSLICE__(encrypted_slice, 14, 0);
+
         uint64_t ca = (sign << 63) | (power << 57) | (upper_encrypted << 48)
             | (s_prime << 47) | (lower_encrypted << 32)
             | (__BVSLICE__(base, 31, 0));
