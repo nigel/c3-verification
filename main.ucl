@@ -172,13 +172,10 @@ module main {
     {
         var ciphertext : bv24;
         ciphertext = ca[56 : 48] ++ ca[46 : 32];
-        success = false;
-        /*
         success = !((alloc_valid[ca] == false) ||
                 (alloc_encrypted_slices[ciphertext] == false))
             && (alloc_p_keys[ca] == ciphertext)
             && ((alloc_state[ca] == UNINITIALIZED) || ((alloc_d_keys[ca] == dkey) && (alloc_state[ca] == ENCRYPTED)));
-        */
     }
 
 
@@ -236,8 +233,6 @@ module main {
     var debug_raw : ca_t;
     var debug_raw1 : boolean;
 
-    var herro : ca_t;
-
     axiom size_lim : ((size >_u 0bv64) && (size <=_u MAX_ALLOC_SIZE())); 
 
     invariant confidentiality : confidential == true;
@@ -245,7 +240,6 @@ module main {
     // Adversarial action
     next {
         havoc size;
-        havoc herro;
         havoc action;
 
         case
