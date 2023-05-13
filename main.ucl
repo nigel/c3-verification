@@ -7,9 +7,6 @@ module main {
     type pid_t = bv1;
 
     /* State variables */
-    var pointer_key :   bv24;
-    var data_key    :   bv24;
-    // TODO pointer_key and data_key will need to be per process.
     // spec 0.5 says these keys should be 72 bits
 
     /*****
@@ -36,6 +33,9 @@ module main {
 
     // true if raw address has been taken up
     var addr_is_alloc : [addr_t]boolean;
+
+    // base CAs and the sizes of allocations
+    var alloc_sizes : [ca_t]bv64;
     /* ===============================================================================
     End of memory safety monitor variables */
 
@@ -45,15 +45,6 @@ module main {
     define S_IDX() : integer = 63;
 
     /* Calculates the tweak to be used with K-Cipher */
-    define calculate_tweak(arg : bv38) : bv24 =
-        arg[23 : 0] ^ (0bv10 ++ arg[37 : 24]);
-
-    define k_cipher(
-                plaintext : bv24,
-                key : bv24,
-                tweak : bv24) : bv24 = plaintext ^ key ^ tweak;
-    // TODO need to define axioms for cryptographic unit.
-
     /* Extracts bits [31 : power] from addr */
     define get_fixed_addr (power : bv6, addr: addr_t) : bv32 =
         bv_left_shift(0bv58 ++ power,
@@ -71,13 +62,12 @@ module main {
     procedure malloc(size : bv64, pkey : bv24)
         returns (ca : ca_t)
         modifies addr_is_alloc, alloc_encrypted_slices,
-            alloc_allocated, alloc_p_keys, alloc_state, alloc_valid, debug_raw, debug_raw1;
+            alloc_allocated, alloc_p_keys, alloc_state, alloc_valid, debug_raw, debug_raw1, alloc_sizes;
 
         // TODO temporary, hard to reason about bigger allocation
         requires (size == 1bv64);
-        //requires ((size >_u 0bv64) && (size <=_u MAX_ALLOC_SIZE()));
-        //ensures (alloc_allocated[ca] == true);
-        ensures ((ca + size) >_u ca);
+        requires ((size >_u 0bv64) && (size <=_u MAX_ALLOC_SIZE()));
+        ensures ((ca + size) >_u ca) && (alloc_allocated[ca]);
     {
         // The address we generate given the size.
         var addr : addr_t;
@@ -111,13 +101,11 @@ module main {
 
         _i = 0bv64;
         while (_i <_u size)
-            /*
             // loop _i must be within bounds
-            //invariant ((_i >=_u 0bv64) && (_i <=_u size));
+            invariant ((_i >=_u 0bv64) && (_i <=_u size));
             // the addr_is_alloc must be working
             invariant (forall (i : bv64) ::
                 (i >= 0bv64 && i < _i) ==> ((addr_is_alloc[addr + i] == true)));
-            */
         {
             addr_is_alloc[addr + _i] = true;
             _i = _i + 1bv64;
@@ -137,7 +125,6 @@ module main {
         
         // set the allocation structure
         _state = UNINITIALIZED;
-        /*
         _i = 0bv64;
         while (_i <_u size)
             invariant ((_i >=_u 0bv64) && (_i <=_u size));
@@ -145,10 +132,8 @@ module main {
             call set_alloc_metadata(ca + _i, pkey, _state);
             _i = _i + 1bv64;
         }
-        */
         call set_alloc_metadata(ca, pkey, _state);
-
-        //debug_raw1 = alloc_allocated[0bv64];
+        alloc_sizes[ca] = size;
     }
 
     /* Sets alloc metadata if needed */
@@ -173,9 +158,27 @@ module main {
         var ciphertext : bv24;
         ciphertext = ca[56 : 48] ++ ca[46 : 32];
         success = !((alloc_valid[ca] == false) ||
-                (alloc_encrypted_slices[ciphertext] == false))
-            && (alloc_p_keys[ca] == ciphertext)
-            && ((alloc_state[ca] == UNINITIALIZED) || ((alloc_d_keys[ca] == dkey) && (alloc_state[ca] == ENCRYPTED)));
+                (alloc_encrypted_slices[ciphertext] == false)) && (alloc_p_keys[ca] == pkey) && ((alloc_state[ca] == UNINITIALIZED) || ((alloc_d_keys[ca] == dkey))) || (alloc_valid[ca]);
+    }
+
+    /* Frees an allocation */
+    procedure free(ca : ca_t, pkey : bv24)
+        returns (success : boolean)
+        modifies alloc_valid, alloc_allocated;
+    {
+        var _i : bv64;
+
+        success = !((alloc_valid[ca] == false) || (alloc_sizes[ca] == 0bv64));
+
+        if (success) {
+            _i = 0bv64;
+            alloc_valid[ca] = false;
+            alloc_allocated[ca] = false;
+            while (_i <_u alloc_sizes[ca]) {
+                alloc_valid[ca + _i] = false;
+                alloc_allocated[ca + _i] = false;
+            }
+        }
     }
 
 
@@ -191,56 +194,88 @@ module main {
         if (alloc_valid[ca] == false) {
             // OOB write
             // assert (false);
+            //alloc_p_keys[ca] = pkey;
             call set_alloc_metadata(ca, pkey, _state);
         } else {
             // Regular access
-            assert (alloc_p_keys[ca] == pkey);
             alloc_d_keys[ca] = dkey;
             alloc_state[ca] = _state;
         }
     }
 
     init {
+        havoc current_pid;
+
         alloc = 0bv64;
-        byte = 0bv8;
         size = 1bv64;
         confidential = true;
         action = MALLOC;
-
+        
         debug_raw1 = true;
 
-        pointer_key = 1337bv24;
-        data_key = 1337bv24;
+        assume ((pointer_keys[0bv2] != pointer_keys[1bv2])
+            && (pointer_keys[0bv2] != pointer_keys[2bv2])
+            && (pointer_keys[0bv2] != pointer_keys[3bv2]));
+
+        assume ((pointer_keys[1bv2] != pointer_keys[2bv2])
+            && (pointer_keys[1bv2] != pointer_keys[3bv2]));
+
+        assume (pointer_keys[2bv2] != pointer_keys[3bv2]);
+
+        assume ((data_keys[0bv2] != data_keys[1bv2])
+            && (data_keys[0bv2] != data_keys[2bv2])
+            && (data_keys[0bv2] != data_keys[3bv2]));
+
+        assume ((data_keys[1bv2] != data_keys[2bv2])
+            && (data_keys[1bv2] != data_keys[3bv2]));
+
+        assume (data_keys[2bv2] != data_keys[3bv2]);
 
         assume (forall (i : ca_t) ::  alloc_valid[i] == false);
         assume (forall (i : addr_t) ::  addr_is_alloc[i] == false);
         assume (forall (i : ca_t) ::  alloc_allocated[i] == false);
-
-
-        // for some reason we need this for the proof to work
+        assume (forall (i : ca_t) ::  alloc_sizes[i] == 0bv64);
     }
 
     /**
     * Testbench
     */
-    type action_t = enum {MALLOC, WRITE, READ};
+    type action_t = enum {MALLOC, WRITE, READ, FREE};
     var alloc : ca_t;
-    var byte : data_t;
     var size : bv64;
-    var offset : bv64;
     var confidential : boolean;
     var action : action_t;
     var debug_raw : ca_t;
     var debug_raw1 : boolean;
+    var free_success : boolean;
+
+    // will try to read an arbitrary CA
+    var target_read : ca_t;
 
     axiom size_lim : ((size >_u 0bv64) && (size <=_u MAX_ALLOC_SIZE())); 
 
-    invariant confidentiality : confidential == true;
+    invariant confidentiality :
+        ((action == READ) && confidential && alloc_allocated[target_read]
+        && (alloc_state[target_read] == ENCRYPTED)) && (alloc_valid[target_read]) ==>
+        confidential || ((pointer_keys[current_pid] == alloc_p_keys[target_read])
+            && (data_keys[current_pid] == alloc_d_keys[target_read]));
+
+    var current_pid : bv2;
+    var pointer_keys : [bv2]bv24;
+    var data_keys : [bv2]bv24;
 
     // Adversarial action
     next {
+        var pointer_key : bv24;
+        var data_key : bv24;
+
         havoc size;
         havoc action;
+        havoc target_read;
+        havoc current_pid;
+
+        pointer_key = pointer_keys[current_pid];
+        data_key = data_keys[current_pid];
 
         case
             (action == MALLOC) : {
@@ -248,18 +283,21 @@ module main {
             }
 
             (action == WRITE) : {
-                call write_byte(alloc', data_key, pointer_key);
+                call write_byte(target_read, data_key, pointer_key);
             }
 
             (action == READ) : {
-                call (confidential') = read_byte(alloc', data_key, pointer_key);
+                call (confidential') = read_byte(target_read, data_key, pointer_key);
+            }
+
+            (action == FREE) : {
+                call (free_success') = free(target_read, pointer_key);
             }
         esac
-
     }
 
     control {
-        f = bmc(2);
+        f = bmc(7);
         check;
         f.print_cex();
         print_results;
