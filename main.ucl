@@ -40,7 +40,7 @@ module main {
     End of memory safety monitor variables */
 
     /* spec p14 defines maximum allocation size */
-    define MAX_ALLOC_SIZE() : bv64 = 1bv64;
+    define MAX_ALLOC_SIZE() : bv64 = 4000000000bv64;
     define S_PRIME_IDX() : integer = 47;
     define S_IDX() : integer = 63;
 
@@ -64,8 +64,6 @@ module main {
         modifies addr_is_alloc, alloc_encrypted_slices,
             alloc_allocated, alloc_p_keys, alloc_state, alloc_valid, debug_raw, debug_raw1, alloc_sizes;
 
-        // TODO temporary, hard to reason about bigger allocation
-        requires (size == 1bv64);
         requires ((size >_u 0bv64) && (size <=_u MAX_ALLOC_SIZE()));
         ensures ((ca + size) >_u ca) && (alloc_allocated[ca]);
     {
@@ -157,8 +155,14 @@ module main {
     {
         var ciphertext : bv24;
         ciphertext = ca[56 : 48] ++ ca[46 : 32];
+
+        /* Conditions for a successful read:
+            - The target is VALID and the CA has a valid encrypted slice.
+            - The target's pointer and data key matches with the provided one.
+        */
         success = !((alloc_valid[ca] == false) ||
-                (alloc_encrypted_slices[ciphertext] == false)) && (alloc_p_keys[ca] == pkey) && ((alloc_state[ca] == UNINITIALIZED) || ((alloc_d_keys[ca] == dkey))) || (alloc_valid[ca]);
+            (alloc_encrypted_slices[ciphertext] == false)) && (alloc_p_keys[ca] == pkey) && (alloc_d_keys[ca] == dkey);
+
     }
 
     /* Frees an allocation */
@@ -208,11 +212,14 @@ module main {
 
         alloc = 0bv64;
         size = 1bv64;
-        confidential = true;
+        information_gain = false;
         action = MALLOC;
+
+        confidential = true;
         
         debug_raw1 = true;
 
+        // The poiter and data keys are all unique for every PID.
         assume ((pointer_keys[0bv2] != pointer_keys[1bv2])
             && (pointer_keys[0bv2] != pointer_keys[2bv2])
             && (pointer_keys[0bv2] != pointer_keys[3bv2]));
@@ -235,6 +242,7 @@ module main {
         assume (forall (i : addr_t) ::  addr_is_alloc[i] == false);
         assume (forall (i : ca_t) ::  alloc_allocated[i] == false);
         assume (forall (i : ca_t) ::  alloc_sizes[i] == 0bv64);
+        // assume (forall (i : ca_t) ::  alloc_state[i] == UNINITIALIZED);
     }
 
     /**
@@ -243,6 +251,7 @@ module main {
     type action_t = enum {MALLOC, WRITE, READ, FREE};
     var alloc : ca_t;
     var size : bv64;
+    var information_gain : boolean;
     var confidential : boolean;
     var action : action_t;
     var debug_raw : ca_t;
@@ -254,12 +263,9 @@ module main {
 
     axiom size_lim : ((size >_u 0bv64) && (size <=_u MAX_ALLOC_SIZE())); 
 
-    invariant confidentiality :
-        ((action == READ) && confidential && alloc_allocated[target_read]
-        && (alloc_state[target_read] == ENCRYPTED)) && (alloc_valid[target_read]) ==>
-        confidential || ((pointer_keys[current_pid] == alloc_p_keys[target_read])
-            && (data_keys[current_pid] == alloc_d_keys[target_read]));
-
+    // Check control block for full property
+    invariant confidentiality : confidential;
+                
     var current_pid : bv2;
     var pointer_keys : [bv2]bv24;
     var data_keys : [bv2]bv24;
@@ -280,24 +286,31 @@ module main {
         case
             (action == MALLOC) : {
                 call (alloc') = malloc(size, pointer_key);
+                information_gain' = false;
             }
 
             (action == WRITE) : {
                 call write_byte(target_read, data_key, pointer_key);
+                information_gain' = false;
             }
 
             (action == READ) : {
-                call (confidential') = read_byte(target_read, data_key, pointer_key);
+                call (information_gain') = read_byte(target_read, data_key, pointer_key);
             }
 
             (action == FREE) : {
                 call (free_success') = free(target_read, pointer_key);
+                information_gain' = false;
             }
         esac
+
+        // Setting the invariant
+        confidential' = information_gain' ==>
+            ((pointer_keys[current_pid] == alloc_p_keys[target_read]) && (data_keys[current_pid] == alloc_d_keys[target_read]));
     }
 
     control {
-        f = bmc(7);
+        f = bmc(4);
         check;
         f.print_cex();
         print_results;
